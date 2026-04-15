@@ -8,10 +8,9 @@ Prerequisites:
   1. Create OAuth credentials at https://console.cloud.google.com/apis/credentials
      - Application type: Desktop app
   2. Enable the Gmail API at https://console.cloud.google.com/apis/library/gmail.googleapis.com
-  3. Download the JSON and save as credentials.json in this directory
+  3. Download the client secret JSON into this directory (any client_secret*.json filename works)
 """
 
-import os
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -22,7 +21,26 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 _DIR = Path(__file__).parent.resolve()
 _TOKEN_PATH = _DIR / 'token.json'
-_CREDENTIALS_PATH = _DIR / 'credentials.json'
+
+
+def _find_client_secret() -> Path:
+    """Find the Google OAuth client secret JSON in the project directory."""
+    # Check for client_secret*.json first (default Google download name)
+    matches = list(_DIR.glob('client_secret*.json'))
+    if matches:
+        return matches[0]
+
+    # Fall back to credentials.json
+    fallback = _DIR / 'credentials.json'
+    if fallback.exists():
+        return fallback
+
+    raise FileNotFoundError(
+        f"No client secret JSON found in {_DIR}\n"
+        "Download it from Google Cloud Console (APIs & Services > Credentials > "
+        "Desktop app > Download JSON) and place the client_secret_*.json file "
+        "in the project directory."
+    )
 
 
 def get_gmail_credentials() -> Credentials:
@@ -41,14 +59,10 @@ def get_gmail_credentials() -> Credentials:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            if not _CREDENTIALS_PATH.exists():
-                raise FileNotFoundError(
-                    f"Missing {_CREDENTIALS_PATH}\n"
-                    "Download OAuth credentials from Google Cloud Console "
-                    "and save as credentials.json in the project directory."
-                )
+            client_secret_path = _find_client_secret()
+            print(f"Using client secret: {client_secret_path.name}")
             flow = InstalledAppFlow.from_client_secrets_file(
-                str(_CREDENTIALS_PATH), SCOPES
+                str(client_secret_path), SCOPES
             )
             creds = flow.run_local_server(port=0)
 
