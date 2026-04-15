@@ -13,9 +13,13 @@ Matches invoices from Gmail and local folders to QuickBooks Online transactions,
 ## Config
 
 - **Gmail Label**: accounting - Ltd Expenses - 24/25 Receipts
-- **Local Folder**: (TBD - on different machine)
+- **Local Receipts Folder**: /Users/matt/Desktop/Business Receipts copy
 - **Tax Year**: August 2024 - July 2025
-- **QBO URL**: (set on first run)
+- **QBO URL**: https://qbo.intuit.co.uk
+
+## Quick Start
+
+Run `/transaction-audit` in a Claude session from this directory to start the full pipeline.
 
 ## Input Files
 
