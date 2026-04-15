@@ -90,10 +90,11 @@ def _parse_excel_transactions(path: Path) -> list[dict]:
         return []
 
     # Find header row (skip any QBO metadata rows)
+    # Look for a row where a cell is exactly "date" (not just contains it)
     header_idx = 0
     for i, row in enumerate(rows):
-        row_strs = [str(c).lower() if c else '' for c in row]
-        if any('date' in s for s in row_strs):
+        row_strs = [str(c).lower().strip() if c else '' for c in row]
+        if 'date' in row_strs:
             header_idx = i
             break
 
@@ -163,7 +164,7 @@ def _map_columns(headers: list[str]) -> dict:
             break
 
     # Reference number
-    for key in ['num', 'ref no.', 'reference', 'doc number', 'ref no']:
+    for key in ['num', 'no.', 'ref no.', 'reference', 'doc number', 'ref no']:
         if key in normalised:
             col_map['num'] = normalised[key]
             break
@@ -178,15 +179,23 @@ def _extract_transaction(row: dict, col_map: dict) -> Optional[dict]:
         return None
 
     # Parse date (QBO uses various formats)
-    txn_date = _parse_date(str(date_str))
+    # Skip summary rows like "TOTAL"
+    if isinstance(date_str, str) and date_str.strip().upper() == 'TOTAL':
+        return None
+    txn_date = _parse_date(date_str)
     if not txn_date:
         return None
 
     # Parse amount — handle single column or split Spent/Received columns
     amount = None
     if 'amount' in col_map:
-        amount_str = str(row.get(col_map['amount'], '0'))
-        amount = _parse_amount(amount_str)
+        raw_amount = row.get(col_map['amount'], None)
+        if raw_amount is None:
+            return None
+        if isinstance(raw_amount, (int, float)):
+            amount = float(raw_amount)
+        else:
+            amount = _parse_amount(str(raw_amount))
     elif 'spent' in col_map or 'received' in col_map:
         spent_str = str(row.get(col_map.get('spent', ''), '') or '')
         received_str = str(row.get(col_map.get('received', ''), '') or '')
@@ -200,12 +209,17 @@ def _extract_transaction(row: dict, col_map: dict) -> Optional[dict]:
     if amount is None or amount == 0:
         return None
 
-    # Vendor: prefer From/To, fall back to Bank description
-    vendor = str(row.get(col_map.get('vendor', ''), '')).strip()
+    # Vendor: prefer Name column, fall back to Bank description, then extract from Memo
+    vendor = str(row.get(col_map.get('vendor', ''), '') or '').strip()
     if not vendor and 'bank_description' in col_map:
-        vendor = str(row.get(col_map['bank_description'], '')).strip()
+        vendor = str(row.get(col_map['bank_description'], '') or '').strip()
 
-    description = str(row.get(col_map.get('description', ''), '')).strip()
+    description = str(row.get(col_map.get('description', ''), '') or '').strip()
+
+    # If vendor is still empty, try to extract from Memo/description
+    # QBO pattern: "Card 13, Ahrefs" or "MOB, Matthew Jones, Salary"
+    if not vendor and description:
+        vendor = _extract_vendor_from_memo(description)
     txn_type = str(row.get(col_map.get('type', ''), '')).strip()
     num = str(row.get(col_map.get('num', ''), '')).strip()
 
@@ -221,19 +235,23 @@ def _extract_transaction(row: dict, col_map: dict) -> Optional[dict]:
     }
 
 
-def _parse_date(s: str) -> Optional[datetime]:
-    """Try multiple date formats."""
+def _parse_date(s) -> Optional[datetime]:
+    """Try multiple date formats. Accepts str or datetime."""
+    # Handle datetime objects (from Excel)
+    if isinstance(s, datetime):
+        return s
+
+    if not isinstance(s, str) or not s.strip():
+        return None
+
     s = s.strip()
     for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y',
-                '%d %b %Y', '%d %B %Y', '%m/%d/%y', '%d/%m/%y']:
+                '%d %b %Y', '%d %B %Y', '%m/%d/%y', '%d/%m/%y',
+                '%Y-%m-%d %H:%M:%S']:
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
             continue
-
-    # Handle datetime objects (from Excel)
-    if isinstance(s, datetime):
-        return s
 
     return None
 
@@ -251,6 +269,42 @@ def _parse_amount(s: str) -> Optional[float]:
         return float(cleaned)
     except ValueError:
         return None
+
+
+def _extract_vendor_from_memo(memo: str) -> str:
+    """
+    Extract vendor name from QBO Memo field.
+
+    Handles patterns like:
+      "Card 13, Ahrefs" → "Ahrefs"
+      "Card 13, Openai *Chatgpt Subscr, USD -24.00, Rate 0.782..." → "Openai Chatgpt Subscr"
+      "MOB, Matthew Jones, Salary" → "Matthew Jones"
+      "CRD13VM CASHBACK" → "Vm Cashback"
+      "FGN PURCHASE FEE" → ""  (not a useful vendor)
+    """
+    if not memo:
+        return ''
+
+    # Skip known non-vendor memos
+    skip_patterns = ['fgn purchase fee', 'fgn fee', 'cashback', 'created by qb']
+    if any(p in memo.lower() for p in skip_patterns):
+        return ''
+
+    # "Card 13, Vendor Name, ..." → extract second segment
+    parts = [p.strip() for p in memo.split(',')]
+    if len(parts) >= 2 and re.match(r'^card\s+\d+$', parts[0], re.IGNORECASE):
+        vendor = parts[1]
+        # Clean up: remove asterisks, trailing junk
+        vendor = vendor.replace('*', ' ').strip()
+        # Stop at currency/rate info
+        vendor = re.split(r'\s+(?:USD|GBP|EUR|Rate|Fee|Sterling)\b', vendor, flags=re.IGNORECASE)[0].strip()
+        return vendor
+
+    # "MOB, Name, Purpose" → extract second segment
+    if len(parts) >= 2 and re.match(r'^mob$', parts[0], re.IGNORECASE):
+        return parts[1].strip()
+
+    return ''
 
 
 # ---------------------------------------------------------------------------
