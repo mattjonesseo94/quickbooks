@@ -122,21 +122,38 @@ def _map_columns(headers: list[str]) -> dict:
             break
 
     # Vendor/Name
-    for key in ['name', 'vendor', 'payee', 'name/vendor', 'customer/vendor']:
+    for key in ['name', 'vendor', 'payee', 'name/vendor', 'customer/vendor', 'from/to']:
         if key in normalised:
             col_map['vendor'] = normalised[key]
             break
 
-    # Amount
-    for key in ['amount', 'total', 'debit', 'credit', 'net amount']:
+    # Amount (single column)
+    for key in ['amount', 'total', 'net amount']:
         if key in normalised:
             col_map['amount'] = normalised[key]
             break
 
+    # Split amount columns (bank feed format: Spent / Received)
+    for key in ['spent', 'debit', 'money out']:
+        if key in normalised:
+            col_map['spent'] = normalised[key]
+            break
+    for key in ['received', 'credit', 'money in']:
+        if key in normalised:
+            col_map['received'] = normalised[key]
+            break
+
     # Description
-    for key in ['memo/description', 'memo', 'description', 'notes']:
+    for key in ['memo/description', 'memo', 'description', 'notes',
+                'bank description', 'transaction posted']:
         if key in normalised:
             col_map['description'] = normalised[key]
+            break
+
+    # Bank description (used as vendor fallback for bank feed exports)
+    for key in ['bank description']:
+        if key in normalised:
+            col_map['bank_description'] = normalised[key]
             break
 
     # Transaction type
@@ -165,13 +182,29 @@ def _extract_transaction(row: dict, col_map: dict) -> Optional[dict]:
     if not txn_date:
         return None
 
-    # Parse amount
-    amount_str = str(row.get(col_map.get('amount', ''), '0'))
-    amount = _parse_amount(amount_str)
+    # Parse amount — handle single column or split Spent/Received columns
+    amount = None
+    if 'amount' in col_map:
+        amount_str = str(row.get(col_map['amount'], '0'))
+        amount = _parse_amount(amount_str)
+    elif 'spent' in col_map or 'received' in col_map:
+        spent_str = str(row.get(col_map.get('spent', ''), '') or '')
+        received_str = str(row.get(col_map.get('received', ''), '') or '')
+        spent = _parse_amount(spent_str) if spent_str.strip() else None
+        received = _parse_amount(received_str) if received_str.strip() else None
+        if spent:
+            amount = -abs(spent)  # Outgoing = negative
+        elif received:
+            amount = abs(received)  # Incoming = positive
+
     if amount is None or amount == 0:
         return None
 
+    # Vendor: prefer From/To, fall back to Bank description
     vendor = str(row.get(col_map.get('vendor', ''), '')).strip()
+    if not vendor and 'bank_description' in col_map:
+        vendor = str(row.get(col_map['bank_description'], '')).strip()
+
     description = str(row.get(col_map.get('description', ''), '')).strip()
     txn_type = str(row.get(col_map.get('type', ''), '')).strip()
     num = str(row.get(col_map.get('num', ''), '')).strip()
