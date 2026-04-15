@@ -63,6 +63,16 @@ SELECTORS = {
         '.attachable-thumbnail, '
         'text="attached"'
     ),
+
+    # Existing attachments (to detect if receipt already attached)
+    'existing_attachment': (
+        '[data-testid="attachment-item"], '
+        '.attachment-item, '
+        '.attachable-thumbnail, '
+        '.attachment-list-item, '
+        '[class*="attachment"] img, '
+        '[class*="Attachment"] img'
+    ),
 }
 
 
@@ -300,6 +310,29 @@ def _parse_date_str(date_str: str):
 
 
 # ---------------------------------------------------------------------------
+# Existing attachment check
+# ---------------------------------------------------------------------------
+
+async def has_existing_attachment(page: Page) -> bool:
+    """
+    Check if the currently open transaction already has an attachment/receipt.
+
+    Returns True if one or more attachments are found.
+    """
+    try:
+        existing = page.locator(SELECTORS['existing_attachment'])
+        count = await existing.count()
+        if count > 0:
+            # Verify at least one is actually visible
+            for i in range(count):
+                if await existing.nth(i).is_visible():
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+# ---------------------------------------------------------------------------
 # File upload
 # ---------------------------------------------------------------------------
 
@@ -473,6 +506,15 @@ async def attach_all_from_report(report_path: str,
                 if status_col is not None:
                     ws.cell(row=row_data['row_num'], column=status_col + 1, value='Not Found')
                 failed_count += 1
+                continue
+
+            # Check if transaction already has a receipt/attachment
+            already_has = await has_existing_attachment(page)
+            if already_has:
+                print(f"  SKIPPED: Already has attachment — no action needed")
+                if status_col is not None:
+                    ws.cell(row=row_data['row_num'], column=status_col + 1, value='Already Attached')
+                attached_count += 1
                 continue
 
             if dry_run:
