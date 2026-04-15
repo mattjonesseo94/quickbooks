@@ -27,11 +27,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-# Add email-replier to path for Gmail auth reuse
 TOOL_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = TOOL_DIR.parent.parent.parent
-EMAIL_REPLIER_DIR = PROJECT_ROOT / '_seo-tools' / 'email-replier'
-sys.path.insert(0, str(EMAIL_REPLIER_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +231,7 @@ def search_gmail_invoices(label_name: str, transactions: list[dict],
 
     Returns: {txn_index: [list of candidate matches]}
     """
-    from gmail_auth import get_gmail_credentials
+    from gmail_oauth import get_gmail_credentials
     from googleapiclient.discovery import build
     import base64
 
@@ -833,9 +829,9 @@ def write_match_report(transactions: list[dict],
 
     # --- Matched tab ---
     ws_matched = wb.create_sheet('Matched')
-    headers = ['Txn Date', 'Vendor', 'Amount', 'Description',
-               'Invoice Source', 'Invoice File/Email', 'Confidence',
-               'Invoice Amount', 'Invoice Date', 'Sender/Filename']
+    headers = ['Txn Date', 'Vendor', 'Amount', 'Description', 'Txn Type', 'Txn Num',
+               'Invoice Source', 'Invoice File/Email', 'Attachment Path', 'Confidence',
+               'Invoice Amount', 'Invoice Date', 'Sender/Filename', 'Attach Status']
     write_header(ws_matched, headers)
 
     for row_idx, (txn_idx, txn, candidates) in enumerate(matched, 2):
@@ -844,14 +840,18 @@ def write_match_report(transactions: list[dict],
         ws_matched.cell(row=row_idx, column=2, value=txn['vendor'])
         ws_matched.cell(row=row_idx, column=3, value=txn['amount'])
         ws_matched.cell(row=row_idx, column=4, value=txn['description'])
-        ws_matched.cell(row=row_idx, column=5, value=best.get('source', ''))
-        ws_matched.cell(row=row_idx, column=6, value=best.get('attachment_path') or best.get('subject', ''))
-        ws_matched.cell(row=row_idx, column=7, value=f"{best['score']:.0f}%")
-        ws_matched.cell(row=row_idx, column=8, value=best['amounts'][0] if best.get('amounts') else '')
-        ws_matched.cell(row=row_idx, column=9, value=best['date'].strftime('%d/%m/%Y') if best.get('date') else '')
-        ws_matched.cell(row=row_idx, column=10, value=best.get('sender_name', ''))
+        ws_matched.cell(row=row_idx, column=5, value=txn.get('type', ''))
+        ws_matched.cell(row=row_idx, column=6, value=txn.get('num', ''))
+        ws_matched.cell(row=row_idx, column=7, value=best.get('source', ''))
+        ws_matched.cell(row=row_idx, column=8, value=best.get('subject', ''))
+        ws_matched.cell(row=row_idx, column=9, value=best.get('attachment_path', ''))
+        ws_matched.cell(row=row_idx, column=10, value=f"{best['score']:.0f}%")
+        ws_matched.cell(row=row_idx, column=11, value=best['amounts'][0] if best.get('amounts') else '')
+        ws_matched.cell(row=row_idx, column=12, value=best['date'].strftime('%d/%m/%Y') if best.get('date') else '')
+        ws_matched.cell(row=row_idx, column=13, value=best.get('sender_name', ''))
+        ws_matched.cell(row=row_idx, column=14, value='')  # Attach Status — filled by qbo_attach
 
-        for col in range(1, 11):
+        for col in range(1, 15):
             ws_matched.cell(row=row_idx, column=col).fill = green_fill
 
     _auto_width(ws_matched)
@@ -963,12 +963,21 @@ def main():
                         help='Skip local folder search')
     parser.add_argument('--attach', metavar='REPORT',
                         help='Attach matched invoices to QBO (pass match report xlsx)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='With --attach: find transactions in QBO but do not upload')
+    parser.add_argument('--qbo-url', default='https://qbo.intuit.co.uk',
+                        help='QBO base URL (default: UK)')
 
     args = parser.parse_args()
 
     if args.attach:
-        print("QBO attachment mode not yet implemented.")
-        print("This will use browser automation to upload invoices to QBO transactions.")
+        import asyncio
+        from qbo_attach import attach_all_from_report
+        asyncio.run(attach_all_from_report(
+            args.attach,
+            qbo_base_url=args.qbo_url,
+            dry_run=args.dry_run,
+        ))
         sys.exit(0)
 
     if not args.transactions:

@@ -26,15 +26,19 @@ Matches invoices from Gmail and local folders to QuickBooks Online transactions,
 
 ```bash
 # Step 1: Parse transactions + search for invoices
-python3 Personal/_personal-tools/qbo-matcher/qbo_matcher.py \
+python3 qbo_matcher.py \
   --transactions path/to/transactions.csv \
   --gmail-label "accounting - Ltd Expenses - 24/25 Receipts" \
   --local-folder path/to/invoices/ \
   --output match_report.xlsx
 
 # Step 2: Attach to QBO via browser (after review)
-python3 Personal/_personal-tools/qbo-matcher/qbo_matcher.py \
+python3 qbo_matcher.py \
   --attach match_report.xlsx
+
+# Dry-run attach (finds transactions but doesn't upload)
+python3 qbo_matcher.py \
+  --attach match_report.xlsx --dry-run
 ```
 
 ## Matching Logic
