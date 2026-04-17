@@ -13,9 +13,13 @@ Matches invoices from Gmail and local folders to QuickBooks Online transactions,
 ## Config
 
 - **Gmail Label**: accounting - Ltd Expenses - 24/25 Receipts
-- **Local Folder**: (TBD - on different machine)
+- **Local Receipts Folder**: /Users/matt/Desktop/Business Receipts copy
 - **Tax Year**: August 2024 - July 2025
-- **QBO URL**: (set on first run)
+- **QBO URL**: https://qbo.intuit.co.uk
+
+## Quick Start
+
+Run `/transaction-audit` in a Claude session from this directory to start the full pipeline.
 
 ## Input Files
 
@@ -26,15 +30,19 @@ Matches invoices from Gmail and local folders to QuickBooks Online transactions,
 
 ```bash
 # Step 1: Parse transactions + search for invoices
-python3 Personal/_personal-tools/qbo-matcher/qbo_matcher.py \
+python3 qbo_matcher.py \
   --transactions path/to/transactions.csv \
   --gmail-label "accounting - Ltd Expenses - 24/25 Receipts" \
   --local-folder path/to/invoices/ \
   --output match_report.xlsx
 
 # Step 2: Attach to QBO via browser (after review)
-python3 Personal/_personal-tools/qbo-matcher/qbo_matcher.py \
+python3 qbo_matcher.py \
   --attach match_report.xlsx
+
+# Dry-run attach (finds transactions but doesn't upload)
+python3 qbo_matcher.py \
+  --attach match_report.xlsx --dry-run
 ```
 
 ## Matching Logic

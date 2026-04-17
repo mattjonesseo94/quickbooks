@@ -1,0 +1,8 @@
+token.json
+credentials.json
+client_secret*.json
+.cache/
+*.xlsx
+__pycache__/
+.venv/
+*.pyc

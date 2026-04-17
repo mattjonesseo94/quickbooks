@@ -27,11 +27,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-# Add email-replier to path for Gmail auth reuse
 TOOL_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = TOOL_DIR.parent.parent.parent
-EMAIL_REPLIER_DIR = PROJECT_ROOT / '_seo-tools' / 'email-replier'
-sys.path.insert(0, str(EMAIL_REPLIER_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +90,11 @@ def _parse_excel_transactions(path: Path) -> list[dict]:
         return []
 
     # Find header row (skip any QBO metadata rows)
+    # Look for a row where a cell is exactly "date" (not just contains it)
     header_idx = 0
     for i, row in enumerate(rows):
-        row_strs = [str(c).lower() if c else '' for c in row]
-        if any('date' in s for s in row_strs):
+        row_strs = [str(c).lower().strip() if c else '' for c in row]
+        if 'date' in row_strs:
             header_idx = i
             break
 
@@ -126,21 +123,38 @@ def _map_columns(headers: list[str]) -> dict:
             break
 
     # Vendor/Name
-    for key in ['name', 'vendor', 'payee', 'name/vendor', 'customer/vendor']:
+    for key in ['name', 'vendor', 'payee', 'name/vendor', 'customer/vendor', 'from/to']:
         if key in normalised:
             col_map['vendor'] = normalised[key]
             break
 
-    # Amount
-    for key in ['amount', 'total', 'debit', 'credit', 'net amount']:
+    # Amount (single column)
+    for key in ['amount', 'total', 'net amount']:
         if key in normalised:
             col_map['amount'] = normalised[key]
             break
 
+    # Split amount columns (bank feed format: Spent / Received)
+    for key in ['spent', 'debit', 'money out']:
+        if key in normalised:
+            col_map['spent'] = normalised[key]
+            break
+    for key in ['received', 'credit', 'money in']:
+        if key in normalised:
+            col_map['received'] = normalised[key]
+            break
+
     # Description
-    for key in ['memo/description', 'memo', 'description', 'notes']:
+    for key in ['memo/description', 'memo', 'description', 'notes',
+                'bank description', 'transaction posted']:
         if key in normalised:
             col_map['description'] = normalised[key]
+            break
+
+    # Bank description (used as vendor fallback for bank feed exports)
+    for key in ['bank description']:
+        if key in normalised:
+            col_map['bank_description'] = normalised[key]
             break
 
     # Transaction type
@@ -150,7 +164,7 @@ def _map_columns(headers: list[str]) -> dict:
             break
 
     # Reference number
-    for key in ['num', 'ref no.', 'reference', 'doc number', 'ref no']:
+    for key in ['num', 'no.', 'ref no.', 'reference', 'doc number', 'ref no']:
         if key in normalised:
             col_map['num'] = normalised[key]
             break
@@ -165,18 +179,47 @@ def _extract_transaction(row: dict, col_map: dict) -> Optional[dict]:
         return None
 
     # Parse date (QBO uses various formats)
-    txn_date = _parse_date(str(date_str))
+    # Skip summary rows like "TOTAL"
+    if isinstance(date_str, str) and date_str.strip().upper() == 'TOTAL':
+        return None
+    txn_date = _parse_date(date_str)
     if not txn_date:
         return None
 
-    # Parse amount
-    amount_str = str(row.get(col_map.get('amount', ''), '0'))
-    amount = _parse_amount(amount_str)
+    # Parse amount — handle single column or split Spent/Received columns
+    amount = None
+    if 'amount' in col_map:
+        raw_amount = row.get(col_map['amount'], None)
+        if raw_amount is None:
+            return None
+        if isinstance(raw_amount, (int, float)):
+            amount = float(raw_amount)
+        else:
+            amount = _parse_amount(str(raw_amount))
+    elif 'spent' in col_map or 'received' in col_map:
+        spent_str = str(row.get(col_map.get('spent', ''), '') or '')
+        received_str = str(row.get(col_map.get('received', ''), '') or '')
+        spent = _parse_amount(spent_str) if spent_str.strip() else None
+        received = _parse_amount(received_str) if received_str.strip() else None
+        if spent:
+            amount = -abs(spent)  # Outgoing = negative
+        elif received:
+            amount = abs(received)  # Incoming = positive
+
     if amount is None or amount == 0:
         return None
 
-    vendor = str(row.get(col_map.get('vendor', ''), '')).strip()
-    description = str(row.get(col_map.get('description', ''), '')).strip()
+    # Vendor: prefer Name column, fall back to Bank description, then extract from Memo
+    vendor = str(row.get(col_map.get('vendor', ''), '') or '').strip()
+    if not vendor and 'bank_description' in col_map:
+        vendor = str(row.get(col_map['bank_description'], '') or '').strip()
+
+    description = str(row.get(col_map.get('description', ''), '') or '').strip()
+
+    # If vendor is still empty, try to extract from Memo/description
+    # QBO pattern: "Card 13, Ahrefs" or "MOB, Matthew Jones, Salary"
+    if not vendor and description:
+        vendor = _extract_vendor_from_memo(description)
     txn_type = str(row.get(col_map.get('type', ''), '')).strip()
     num = str(row.get(col_map.get('num', ''), '')).strip()
 
@@ -192,19 +235,23 @@ def _extract_transaction(row: dict, col_map: dict) -> Optional[dict]:
     }
 
 
-def _parse_date(s: str) -> Optional[datetime]:
-    """Try multiple date formats."""
+def _parse_date(s) -> Optional[datetime]:
+    """Try multiple date formats. Accepts str or datetime."""
+    # Handle datetime objects (from Excel)
+    if isinstance(s, datetime):
+        return s
+
+    if not isinstance(s, str) or not s.strip():
+        return None
+
     s = s.strip()
     for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y',
-                '%d %b %Y', '%d %B %Y', '%m/%d/%y', '%d/%m/%y']:
+                '%d %b %Y', '%d %B %Y', '%m/%d/%y', '%d/%m/%y',
+                '%Y-%m-%d %H:%M:%S']:
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
             continue
-
-    # Handle datetime objects (from Excel)
-    if isinstance(s, datetime):
-        return s
 
     return None
 
@@ -224,6 +271,42 @@ def _parse_amount(s: str) -> Optional[float]:
         return None
 
 
+def _extract_vendor_from_memo(memo: str) -> str:
+    """
+    Extract vendor name from QBO Memo field.
+
+    Handles patterns like:
+      "Card 13, Ahrefs" → "Ahrefs"
+      "Card 13, Openai *Chatgpt Subscr, USD -24.00, Rate 0.782..." → "Openai Chatgpt Subscr"
+      "MOB, Matthew Jones, Salary" → "Matthew Jones"
+      "CRD13VM CASHBACK" → "Vm Cashback"
+      "FGN PURCHASE FEE" → ""  (not a useful vendor)
+    """
+    if not memo:
+        return ''
+
+    # Skip known non-vendor memos
+    skip_patterns = ['fgn purchase fee', 'fgn fee', 'cashback', 'created by qb']
+    if any(p in memo.lower() for p in skip_patterns):
+        return ''
+
+    # "Card 13, Vendor Name, ..." → extract second segment
+    parts = [p.strip() for p in memo.split(',')]
+    if len(parts) >= 2 and re.match(r'^card\s+\d+$', parts[0], re.IGNORECASE):
+        vendor = parts[1]
+        # Clean up: remove asterisks, trailing junk
+        vendor = vendor.replace('*', ' ').strip()
+        # Stop at currency/rate info
+        vendor = re.split(r'\s+(?:USD|GBP|EUR|Rate|Fee|Sterling)\b', vendor, flags=re.IGNORECASE)[0].strip()
+        return vendor
+
+    # "MOB, Name, Purpose" → extract second segment
+    if len(parts) >= 2 and re.match(r'^mob$', parts[0], re.IGNORECASE):
+        return parts[1].strip()
+
+    return ''
+
+
 # ---------------------------------------------------------------------------
 # Gmail invoice search
 # ---------------------------------------------------------------------------
@@ -235,7 +318,7 @@ def search_gmail_invoices(label_name: str, transactions: list[dict],
 
     Returns: {txn_index: [list of candidate matches]}
     """
-    from gmail_auth import get_gmail_credentials
+    from gmail_oauth import get_gmail_credentials
     from googleapiclient.discovery import build
     import base64
 
@@ -833,9 +916,9 @@ def write_match_report(transactions: list[dict],
 
     # --- Matched tab ---
     ws_matched = wb.create_sheet('Matched')
-    headers = ['Txn Date', 'Vendor', 'Amount', 'Description',
-               'Invoice Source', 'Invoice File/Email', 'Confidence',
-               'Invoice Amount', 'Invoice Date', 'Sender/Filename']
+    headers = ['Txn Date', 'Vendor', 'Amount', 'Description', 'Txn Type', 'Txn Num',
+               'Invoice Source', 'Invoice File/Email', 'Attachment Path', 'Confidence',
+               'Invoice Amount', 'Invoice Date', 'Sender/Filename', 'Attach Status']
     write_header(ws_matched, headers)
 
     for row_idx, (txn_idx, txn, candidates) in enumerate(matched, 2):
@@ -844,14 +927,18 @@ def write_match_report(transactions: list[dict],
         ws_matched.cell(row=row_idx, column=2, value=txn['vendor'])
         ws_matched.cell(row=row_idx, column=3, value=txn['amount'])
         ws_matched.cell(row=row_idx, column=4, value=txn['description'])
-        ws_matched.cell(row=row_idx, column=5, value=best.get('source', ''))
-        ws_matched.cell(row=row_idx, column=6, value=best.get('attachment_path') or best.get('subject', ''))
-        ws_matched.cell(row=row_idx, column=7, value=f"{best['score']:.0f}%")
-        ws_matched.cell(row=row_idx, column=8, value=best['amounts'][0] if best.get('amounts') else '')
-        ws_matched.cell(row=row_idx, column=9, value=best['date'].strftime('%d/%m/%Y') if best.get('date') else '')
-        ws_matched.cell(row=row_idx, column=10, value=best.get('sender_name', ''))
+        ws_matched.cell(row=row_idx, column=5, value=txn.get('type', ''))
+        ws_matched.cell(row=row_idx, column=6, value=txn.get('num', ''))
+        ws_matched.cell(row=row_idx, column=7, value=best.get('source', ''))
+        ws_matched.cell(row=row_idx, column=8, value=best.get('subject', ''))
+        ws_matched.cell(row=row_idx, column=9, value=best.get('attachment_path', ''))
+        ws_matched.cell(row=row_idx, column=10, value=f"{best['score']:.0f}%")
+        ws_matched.cell(row=row_idx, column=11, value=best['amounts'][0] if best.get('amounts') else '')
+        ws_matched.cell(row=row_idx, column=12, value=best['date'].strftime('%d/%m/%Y') if best.get('date') else '')
+        ws_matched.cell(row=row_idx, column=13, value=best.get('sender_name', ''))
+        ws_matched.cell(row=row_idx, column=14, value='')  # Attach Status — filled by qbo_attach
 
-        for col in range(1, 11):
+        for col in range(1, 15):
             ws_matched.cell(row=row_idx, column=col).fill = green_fill
 
     _auto_width(ws_matched)
@@ -963,12 +1050,21 @@ def main():
                         help='Skip local folder search')
     parser.add_argument('--attach', metavar='REPORT',
                         help='Attach matched invoices to QBO (pass match report xlsx)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='With --attach: find transactions in QBO but do not upload')
+    parser.add_argument('--qbo-url', default='https://qbo.intuit.co.uk',
+                        help='QBO base URL (default: UK)')
 
     args = parser.parse_args()
 
     if args.attach:
-        print("QBO attachment mode not yet implemented.")
-        print("This will use browser automation to upload invoices to QBO transactions.")
+        import asyncio
+        from qbo_attach import attach_all_from_report
+        asyncio.run(attach_all_from_report(
+            args.attach,
+            qbo_base_url=args.qbo_url,
+            dry_run=args.dry_run,
+        ))
         sys.exit(0)
 
     if not args.transactions:
